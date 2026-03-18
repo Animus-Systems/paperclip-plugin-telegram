@@ -1,6 +1,7 @@
 import type { PluginContext, Agent, Issue } from "@paperclipai/plugin-sdk";
 import { sendMessage, escapeMarkdownV2, sendChatAction } from "./telegram-api.js";
 import { METRIC_NAMES } from "./constants.js";
+import { handleAcpCommand } from "./acp-bridge.js";
 
 type BotCommand = {
   command: string;
@@ -13,6 +14,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "agents", description: "List agents with current status" },
   { command: "approve", description: "Approve a pending request by ID" },
   { command: "help", description: "Show available commands" },
+  { command: "acp", description: "Manage ACP coding agent sessions (spawn, status, cancel, close)" },
 ];
 
 export async function handleCommand(
@@ -47,6 +49,9 @@ export async function handleCommand(
       break;
     case "connect-topic":
       await handleConnectTopic(ctx, token, chatId, args, messageThreadId);
+      break;
+    case "acp":
+      await handleAcpCommand(ctx, token, chatId, args, messageThreadId);
       break;
     default:
       await sendMessage(ctx, token, chatId, `Unknown command: /${command}. Try /help`, {

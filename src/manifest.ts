@@ -23,6 +23,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "activity.log.write",
     "metrics.write",
     "jobs.schedule",
+    "events.emit",
+    "events.on",
   ],
   entrypoints: {
     worker: "./dist/worker.js",

@@ -23,6 +23,7 @@ import {
   formatAgentRunFinished,
 } from "./formatters.js";
 import { handleCommand, getTopicForProject, BOT_COMMANDS } from "./commands.js";
+import { routeMessageToAcp, handleAcpOutput } from "./acp-bridge.js";
 import { METRIC_NAMES } from "./constants.js";
 
 type TelegramConfig = {
@@ -307,6 +308,18 @@ const plugin = definePlugin({
       });
     }
 
+    // --- ACP output listener ---
+    ctx.events.on("acp:output", async (event: unknown) => {
+      const acpEvent = event as {
+        sessionId: string;
+        chatId: string;
+        threadId: number;
+        text: string;
+        done?: boolean;
+      };
+      await handleAcpOutput(ctx, token, acpEvent);
+    });
+
     ctx.logger.info("Telegram bot plugin started");
   },
 
@@ -343,6 +356,15 @@ async function handleUpdate(
   const chatId = String(msg.chat.id);
   const text = msg.text;
   const threadId = msg.message_thread_id;
+
+  // Route thread messages to ACP if a session is bound
+  if (threadId) {
+    const isAcpCommand = text.startsWith("/acp");
+    if (!isAcpCommand) {
+      const routed = await routeMessageToAcp(ctx, chatId, threadId, text);
+      if (routed) return;
+    }
+  }
 
   const botCommand = msg.entities?.find((e) => e.type === "bot_command" && e.offset === 0);
   if (botCommand && config.enableCommands) {
