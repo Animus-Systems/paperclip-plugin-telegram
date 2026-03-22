@@ -266,6 +266,13 @@ const plugin = definePlugin({
       ctx.events.on("issue.updated", async (event: PluginEvent) => {
         const payload = event.payload as Record<string, unknown>;
         if (payload.status !== "done") return;
+        // Enrich with title if missing (issue.updated events often omit it)
+        if (!payload.title && event.entityId) {
+          try {
+            const issue = await ctx.issues.get(event.entityId, event.companyId);
+            if (issue) payload.title = issue.title;
+          } catch { /* best effort */ }
+        }
         await notify(event, formatIssueDone);
       });
     }
