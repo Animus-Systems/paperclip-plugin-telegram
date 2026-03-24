@@ -52,8 +52,9 @@ type TelegramConfig = {
   notifyOnAgentError: boolean;
   enableCommands: boolean;
   enableInbound: boolean;
-  dailyDigestEnabled: boolean;
+  digestMode: "off" | "daily" | "bidaily";
   dailyDigestTime: string;
+  bidailySecondTime: string;
   topicRouting: boolean;
   escalationChatId: string;
   escalationTimeoutMs: number;
@@ -362,8 +363,30 @@ const plugin = definePlugin({
 
     // --- Daily digest job ---
 
-    if (config.dailyDigestEnabled) {
+    // Support legacy dailyDigestEnabled boolean
+    const effectiveDigestMode = (config as Record<string, unknown>).dailyDigestEnabled === true && config.digestMode === "off"
+      ? "daily"
+      : config.digestMode ?? "off";
+
+    if (effectiveDigestMode !== "off") {
       ctx.jobs.register("telegram-daily-digest", async () => {
+        // Check if current UTC hour matches a configured digest time
+        const nowHour = new Date().getUTCHours();
+        const nowMin = new Date().getUTCMinutes();
+        const parseHour = (t: string) => {
+          const [h] = (t || "").split(":");
+          return parseInt(h ?? "", 10);
+        };
+        const firstHour = parseHour(config.dailyDigestTime);
+        const secondHour = parseHour(config.bidailySecondTime);
+
+        const shouldSend =
+          (nowMin < 5) && ( // only fire within first 5 min of the hour
+            (nowHour === firstHour) ||
+            (effectiveDigestMode === "bidaily" && nowHour === secondHour)
+          );
+        if (!shouldSend) return;
+
         const companies = await ctx.companies.list();
         for (const company of companies) {
           const chatId = await resolveChat(ctx, company.id, config.defaultChatId);
@@ -390,8 +413,9 @@ const plugin = definePlugin({
 
             const dateStr = new Date().toISOString().split("T")[0];
             const companyLabel = company.name ? ` \\- ${escapeMarkdownV2(company.name)}` : "";
+            const digestLabel = effectiveDigestMode === "bidaily" ? "Digest" : "Daily Digest";
             const lines = [
-              escapeMarkdownV2("\ud83d\udcca") + ` *Daily Digest${companyLabel} \\- ${escapeMarkdownV2(dateStr!)}*`,
+              escapeMarkdownV2("\ud83d\udcca") + ` *${escapeMarkdownV2(digestLabel)}${companyLabel} \\- ${escapeMarkdownV2(dateStr!)}*`,
               "",
               `${escapeMarkdownV2("\u2705")} Tasks completed: *${completedToday.length}*`,
               `${escapeMarkdownV2("\ud83d\udccb")} Tasks created: *${createdToday.length}*`,

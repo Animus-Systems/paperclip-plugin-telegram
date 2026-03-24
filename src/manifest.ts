@@ -100,17 +100,24 @@ const manifest: PaperclipPluginManifestV1 = {
           "Route Telegram messages to Paperclip issue comments. Messages sent in reply to a notification get attached to that issue.",
         default: DEFAULT_CONFIG.enableInbound,
       },
-      dailyDigestEnabled: {
-        type: "boolean",
-        title: "Daily digest",
-        description: "Send a daily summary of agent activity.",
-        default: DEFAULT_CONFIG.dailyDigestEnabled,
+      digestMode: {
+        type: "string",
+        title: "Digest mode",
+        description: "off = disabled, daily = once per day, bidaily = twice per day.",
+        enum: ["off", "daily", "bidaily"],
+        default: DEFAULT_CONFIG.digestMode,
       },
       dailyDigestTime: {
         type: "string",
         title: "Digest time (HH:MM UTC)",
-        description: "Time to send the daily digest in UTC.",
+        description: "Time to send the digest. Used for daily mode and first slot of bidaily mode.",
         default: DEFAULT_CONFIG.dailyDigestTime,
+      },
+      bidailySecondTime: {
+        type: "string",
+        title: "Bidaily second time (HH:MM UTC)",
+        description: "Second digest time for bidaily mode.",
+        default: DEFAULT_CONFIG.bidailySecondTime,
       },
       topicRouting: {
         type: "boolean",
@@ -207,9 +214,9 @@ const manifest: PaperclipPluginManifestV1 = {
   jobs: [
     {
       jobKey: "telegram-daily-digest",
-      displayName: "Telegram Daily Digest",
-      description: "Send a daily summary of agent activity to Telegram.",
-      schedule: "0 9 * * *",
+      displayName: "Telegram Digest",
+      description: "Send a summary of agent activity to Telegram (daily or bidaily).",
+      schedule: "0 * * * *",
     },
     {
       jobKey: "check-escalation-timeouts",
