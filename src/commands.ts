@@ -263,47 +263,60 @@ async function handleConnect(
   messageThreadId?: number,
 ): Promise<void> {
   if (!companyArg.trim()) {
-    await sendMessage(ctx, token, chatId, "Usage: /connect <company-name-or-id>", {
-      messageThreadId,
-    });
+    try {
+      const companies = await ctx.companies.list();
+      const names = companies.map((c) => c.name || c.id).join(", ");
+      await sendMessage(ctx, token, chatId, `Usage: /connect <company-name>\nAvailable: ${names || "none"}`, { messageThreadId });
+    } catch {
+      await sendMessage(ctx, token, chatId, "Usage: /connect <company-name>", { messageThreadId });
+    }
     return;
   }
 
-  const input = companyArg.trim();
-  const companies = await ctx.companies.list();
-  // Match by ID, name (case-insensitive), or shortname prefix
-  const match = companies.find(
-    (c) =>
-      c.id === input ||
-      c.name?.toLowerCase() === input.toLowerCase(),
-  );
+  try {
+    const input = companyArg.trim();
+    const companies = await ctx.companies.list();
+    const match = companies.find(
+      (c) =>
+        c.id === input ||
+        c.name?.toLowerCase() === input.toLowerCase(),
+    );
 
-  if (!match) {
-    const available = companies.map((c) => c.name || c.id).join(", ");
+    if (!match) {
+      const names = companies.map((c) => c.name || c.id).join(", ");
+      await sendMessage(
+        ctx,
+        token,
+        chatId,
+        `Company "${input}" not found. Available: ${names || "none"}`,
+        { messageThreadId },
+      );
+      return;
+    }
+
+    await ctx.state.set(
+      { scopeKind: "instance", stateKey: `chat_${chatId}` },
+      { companyId: match.id, companyName: match.name ?? input, linkedAt: new Date().toISOString() },
+    );
+
     await sendMessage(
       ctx,
       token,
       chatId,
-      `Company not found: "${input}". Available: ${available}`,
+      `${escapeMarkdownV2("🔗")} ${escapeMarkdownV2("Linked this chat to company:")} *${escapeMarkdownV2(match.name ?? input)}*`,
+      { parseMode: "MarkdownV2", messageThreadId },
+    );
+
+    ctx.logger.info("Chat linked to company", { chatId, companyId: match.id, companyName: match.name });
+  } catch (err) {
+    await sendMessage(
+      ctx,
+      token,
+      chatId,
+      `Failed to connect: ${err instanceof Error ? err.message : String(err)}`,
       { messageThreadId },
     );
-    return;
   }
-
-  await ctx.state.set(
-    { scopeKind: "instance", stateKey: `chat_${chatId}` },
-    { companyId: match.id, companyName: match.name ?? input, linkedAt: new Date().toISOString() },
-  );
-
-  await sendMessage(
-    ctx,
-    token,
-    chatId,
-    `${escapeMarkdownV2("🔗")} ${escapeMarkdownV2("Linked this chat to company:")} *${escapeMarkdownV2(match.name ?? input)}*`,
-    { parseMode: "MarkdownV2", messageThreadId },
-  );
-
-  ctx.logger.info("Chat linked to company", { chatId, companyId: match.id, companyName: match.name });
 }
 
 export async function handleConnectTopic(
