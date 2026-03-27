@@ -9,6 +9,7 @@ type MediaConfig = {
   briefAgentId: string;
   briefAgentChatIds: string[];
   transcriptionApiKeyRef: string;
+  publicUrl?: string;
 };
 
 type TelegramMediaMessage = {
@@ -89,6 +90,11 @@ export async function handleMediaMessage(
         reason: "media_intake",
       });
 
+      const hasPublicUrl = config.publicUrl && config.publicUrl.startsWith("https://");
+      const inlineKeyboard = hasPublicUrl
+        ? [[{ text: "View Run ↗", url: `${config.publicUrl}/agents/${config.briefAgentId}/runs/${runId}` }]]
+        : undefined;
+
       await sendMessage(
         ctx,
         token,
@@ -98,6 +104,7 @@ export async function handleMediaMessage(
           parseMode: "MarkdownV2",
           messageThreadId: threadId,
           replyToMessageId: msg.message_id,
+          inlineKeyboard,
         },
       );
 

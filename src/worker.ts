@@ -173,7 +173,7 @@ const plugin = definePlugin({
           if (data.ok && data.result) {
             for (const update of data.result) {
               lastUpdateId = Math.max(lastUpdateId, update.update_id);
-              await handleUpdate(ctx, token, config, update, baseUrl);
+              await handleUpdate(ctx, token, config, update, baseUrl, publicUrl);
             }
           }
         } catch (err) {
@@ -689,6 +689,7 @@ async function handleUpdate(
   config: TelegramConfig,
   update: TelegramUpdate,
   baseUrl: string,
+  publicUrl?: string,
 ): Promise<void> {
   if (update.callback_query) {
     await handleCallbackQuery(ctx, token, update.callback_query, baseUrl);
@@ -709,6 +710,7 @@ async function handleUpdate(
       briefAgentId: config.briefAgentId ?? "",
       briefAgentChatIds: config.briefAgentChatIds ?? [],
       transcriptionApiKeyRef: config.transcriptionApiKeyRef ?? "",
+      publicUrl,
     }, companyId);
     if (handled) return;
   }
@@ -745,7 +747,7 @@ async function handleUpdate(
     if (handledCustom) return;
 
     // Built-in commands
-    await handleCommand(ctx, token, chatId, command, args, threadId, baseUrl);
+    await handleCommand(ctx, token, chatId, command, args, threadId, baseUrl, publicUrl);
     return;
   }
 

@@ -26,18 +26,19 @@ export async function handleCommand(
   args: string,
   messageThreadId?: number,
   baseUrl?: string,
+  publicUrl?: string,
 ): Promise<void> {
   await ctx.metrics.write(METRIC_NAMES.commandsHandled, 1);
 
   switch (command) {
     case "status":
-      await handleStatus(ctx, token, chatId, messageThreadId);
+      await handleStatus(ctx, token, chatId, messageThreadId, publicUrl);
       break;
     case "issues":
-      await handleIssues(ctx, token, chatId, args, messageThreadId, baseUrl);
+      await handleIssues(ctx, token, chatId, args, messageThreadId, publicUrl || baseUrl);
       break;
     case "agents":
-      await handleAgents(ctx, token, chatId, messageThreadId);
+      await handleAgents(ctx, token, chatId, messageThreadId, publicUrl);
       break;
     case "approve":
       await handleApprove(ctx, token, chatId, args, messageThreadId, baseUrl);
@@ -61,11 +62,16 @@ export async function handleCommand(
   }
 }
 
+function isExternalUrl(url?: string): boolean {
+  return !!url && url.startsWith("https://");
+}
+
 async function handleStatus(
   ctx: PluginContext,
   token: string,
   chatId: string,
   messageThreadId?: number,
+  publicUrl?: string,
 ): Promise<void> {
   await sendChatAction(ctx, token, chatId);
 
@@ -83,9 +89,14 @@ async function handleStatus(
       `${escapeMarkdownV2("📋")} Recent issues: *${escapeMarkdownV2(String(issues.length))}* \\(${escapeMarkdownV2(String(doneIssues.length))} done\\)`,
     ];
 
+    const inlineKeyboard = isExternalUrl(publicUrl)
+      ? [[{ text: "Open Dashboard ↗", url: publicUrl! }]]
+      : undefined;
+
     await sendMessage(ctx, token, chatId, lines.join("\n"), {
       parseMode: "MarkdownV2",
       messageThreadId,
+      inlineKeyboard,
     });
   } catch {
     await sendMessage(ctx, token, chatId, escapeMarkdownV2("📊") + " *Paperclip Status*\n\n" + escapeMarkdownV2("Could not fetch status. Make sure this chat is linked to a company with /connect."), {
@@ -155,6 +166,7 @@ async function handleAgents(
   token: string,
   chatId: string,
   messageThreadId?: number,
+  publicUrl?: string,
 ): Promise<void> {
   await sendChatAction(ctx, token, chatId);
 
@@ -167,11 +179,17 @@ async function handleAgents(
       return;
     }
 
+    const hasLinks = isExternalUrl(publicUrl);
     const statusEmoji: Record<string, string> = { active: "🟢", error: "🔴", paused: "🟡", idle: "⚪", running: "🔵" };
     const lines = [escapeMarkdownV2("🤖") + " *Agents*", ""];
     for (const agent of agents) {
       const emoji = statusEmoji[agent.status] ?? "⚪";
-      lines.push(`${escapeMarkdownV2(emoji)} *${escapeMarkdownV2(agent.name)}* \\- ${escapeMarkdownV2(agent.status)}`);
+      if (hasLinks) {
+        const url = `${publicUrl}/agents/${agent.id}`;
+        lines.push(`${escapeMarkdownV2(emoji)} [${escapeMarkdownV2(agent.name)}](${url}) \\- ${escapeMarkdownV2(agent.status)}`);
+      } else {
+        lines.push(`${escapeMarkdownV2(emoji)} *${escapeMarkdownV2(agent.name)}* \\- ${escapeMarkdownV2(agent.status)}`);
+      }
     }
 
     await sendMessage(ctx, token, chatId, lines.join("\n"), {
