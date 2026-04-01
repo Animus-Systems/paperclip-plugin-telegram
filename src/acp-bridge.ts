@@ -539,11 +539,37 @@ export async function routeMessageToAgent(
         reason: "telegram_message",
         onEvent: (event: AgentSessionEvent) => {
           if (event.eventType === "chunk" && event.message) {
+            // Filter out raw JSON events (system init, thinking, tool calls, etc.)
+            // Only forward human-readable assistant text to Telegram
+            const msg = event.message;
+            if (msg.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(msg);
+                // Only forward assistant text content
+                if (parsed.type === "assistant" && parsed.message?.content) {
+                  const textParts = (parsed.message.content as any[])
+                    .filter((c: any) => c.type === "text" && c.text)
+                    .map((c: any) => c.text);
+                  if (textParts.length > 0) {
+                    handleAcpOutput(ctx, token, {
+                      sessionId: targetSession!.sessionId,
+                      chatId,
+                      threadId,
+                      text: textParts.join("\n"),
+                      done: false,
+                    }).catch((err) => ctx.logger.error("Native output handler error", { error: String(err) }));
+                  }
+                }
+                return;
+              } catch {
+                // Not JSON — fall through and send as plain text
+              }
+            }
             handleAcpOutput(ctx, token, {
               sessionId: targetSession!.sessionId,
               chatId,
               threadId,
-              text: event.message,
+              text: msg,
               done: false,
             }).catch((err) => ctx.logger.error("Native output handler error", { error: String(err) }));
           } else if (event.eventType === "done") {
