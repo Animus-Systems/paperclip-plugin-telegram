@@ -862,6 +862,13 @@ async function handleUpdate(
           } else { contextParts.push("Open issues: none"); }
         } catch { contextParts.push("Issues: unavailable"); }
 
+        try {
+          const projects = await ctx.projects.list({ companyId });
+          if (projects.length > 0) {
+            contextParts.push(`Projects: ${projects.map((p: any) => p.name).join(", ")}`);
+          }
+        } catch { /* ok */ }
+
         // ── MemOS search ──
         let memories: string[] = [];
         try {
