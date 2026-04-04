@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import {
   definePlugin,
   runWorker,
@@ -43,6 +44,63 @@ import { handleRegisterWatch, checkWatches } from "./watch-registry.js";
 import { METRIC_NAMES, ACP_SPAWN_EVENT } from "./constants.js";
 import { EscalationManager } from "./escalation.js";
 import type { EscalationEvent } from "./escalation.js";
+
+// ── Shared Telegram archive (CEO Chat plugin reads this) ──
+const TELEGRAM_ARCHIVE_DIR = "/tmp/ceochat-telegram";
+type TgMessage = { role: string; content: string; timestamp: string; source: string };
+type TgArchivedSession = { id: string; startedAt: string; endedAt: string; messageCount: number; preview: string; messages: TgMessage[]; source: string };
+
+function loadTelegramArchive(companyId: string): TgArchivedSession[] {
+  const path = `${TELEGRAM_ARCHIVE_DIR}/${companyId}.json`;
+  try {
+    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf-8")) as TgArchivedSession[];
+  } catch { /* ok */ }
+  return [];
+}
+
+function saveTelegramArchiveFile(companyId: string, sessions: TgArchivedSession[]): void {
+  try {
+    const { mkdirSync } = require("fs");
+    mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
+    writeFileSync(`${TELEGRAM_ARCHIVE_DIR}/${companyId}.json`, JSON.stringify(sessions));
+  } catch { /* ok */ }
+}
+
+function archiveTelegramSession(companyId: string, messages: TgMessage[]): void {
+  if (messages.length === 0) return;
+  const archive = loadTelegramArchive(companyId);
+  const userMsgs = messages.filter(m => m.role === "user");
+  archive.unshift({
+    id: `tg-session-${Date.now()}`,
+    startedAt: messages[0].timestamp,
+    endedAt: messages[messages.length - 1].timestamp,
+    messageCount: messages.length,
+    preview: userMsgs[0]?.content?.slice(0, 100) ?? "Telegram chat",
+    messages,
+    source: "telegram",
+  });
+  if (archive.length > 50) archive.length = 50;
+  saveTelegramArchiveFile(companyId, archive);
+}
+
+function saveTelegramArchive(companyId: string, currentHistory: TgMessage[]): void {
+  // Auto-archive: check if oldest message is > 24h old, if so archive and start fresh
+  if (currentHistory.length > 0) {
+    const oldest = new Date(currentHistory[0].timestamp).getTime();
+    const now = Date.now();
+    if (now - oldest > 24 * 60 * 60 * 1000) {
+      archiveTelegramSession(companyId, currentHistory);
+      // History will be cleared by the caller on next session
+    }
+  }
+  // Also write current session to file so CEO Chat can show it as "active"
+  const path = `${TELEGRAM_ARCHIVE_DIR}/${companyId}-current.json`;
+  try {
+    const { mkdirSync } = require("fs");
+    mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
+    writeFileSync(path, JSON.stringify(currentHistory));
+  } catch { /* ok */ }
+}
 
 type TelegramConfig = {
   telegramBotTokenRef: string;
@@ -756,6 +814,27 @@ async function handleUpdate(
     const args = text.slice(botCommand.offset + botCommand.length).trim();
     const companyId = await resolveCompanyId(ctx, chatId);
 
+    // Archive command — saves current DM chat and starts fresh
+    if (command === "archive" && msg.chat.type === "private") {
+      try {
+        const histKey = { scopeKind: "instance" as const, stateKey: `ava_dm_history_${companyId}` };
+        const dmHistory = ((await ctx.state.get(histKey)) ?? []) as TgMessage[];
+        if (dmHistory.length > 0) {
+          archiveTelegramSession(companyId, dmHistory);
+          await ctx.state.set(histKey, []);
+          // Clear CLI session too
+          const cliKey = { scopeKind: "instance" as const, stateKey: `ava_cli_session_${companyId}` };
+          await ctx.state.set(cliKey, "");
+          await sendMessage(ctx, token, chatId, `Archived ${dmHistory.length} messages. Starting fresh session.`, {});
+        } else {
+          await sendMessage(ctx, token, chatId, "No messages to archive.", {});
+        }
+      } catch (err) {
+        await sendMessage(ctx, token, chatId, `Archive failed: ${String(err).slice(0, 100)}`, {});
+      }
+      return;
+    }
+
     // Phase 4: Check custom commands first
     if (command === "commands") {
       await handleCommandsCommand(ctx, token, chatId, args, threadId, companyId);
@@ -953,6 +1032,20 @@ async function handleUpdate(
 
         // Send to Telegram
         await sendMessage(ctx, token, chatId, result.text, {});
+
+        // ── Save to Telegram DM history (shared file for CEO Chat UI) ──
+        try {
+          const histKey = { scopeKind: "instance" as const, stateKey: `ava_dm_history_${companyId}` };
+          const dmHistory = ((await ctx.state.get(histKey)) ?? []) as Array<{ role: string; content: string; timestamp: string; source: string }>;
+          dmHistory.push({ role: "user", content: text, timestamp: new Date().toISOString(), source: "telegram" });
+          dmHistory.push({ role: "assistant", content: result.text, timestamp: new Date().toISOString(), source: "telegram" });
+          // Keep last 200
+          const trimmed = dmHistory.length > 200 ? dmHistory.slice(-200) : dmHistory;
+          await ctx.state.set(histKey, trimmed);
+
+          // Write to shared file for CEO Chat plugin to read
+          saveTelegramArchive(companyId, trimmed);
+        } catch { /* ok */ }
 
         // ── Store in MemOS ──
         try {
