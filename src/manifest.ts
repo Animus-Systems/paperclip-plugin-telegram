@@ -25,6 +25,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "events.emit",
     "plugin.state.read",
     "plugin.state.write",
+    "projects.read",
     "http.outbound",
     "secrets.read-ref",
     "activity.log.write",
