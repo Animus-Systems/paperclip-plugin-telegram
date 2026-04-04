@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-telegram",
-  "version": "0.2.6",
+  "version": "0.3.0-animus.1",
   "type": "module",
   "main": "./dist/index.js",
   "paperclipPlugin": {
