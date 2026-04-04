@@ -932,14 +932,30 @@ async function handleUpdate(
           contextParts.push(lines.join("\n"));
         } catch { contextParts.push("Agents: unavailable"); }
 
+        // Open issues (multiple status calls since SDK takes single status)
         try {
-          const issues = await ctx.issues.list({ companyId, status: "todo" as const });
-          if (issues.length > 0) {
-            const lines = issues.slice(0, 15).map((i) =>
-              `- ${(i as any).identifier}: ${(i as any).title} [${(i as any).status}]`);
-            contextParts.push(`Open issues (${issues.length}):\n${lines.join("\n")}`);
+          const [todo, inProgress, blocked] = await Promise.all([
+            ctx.issues.list({ companyId, status: "todo" as const }).catch(() => []),
+            ctx.issues.list({ companyId, status: "in_progress" as const }).catch(() => []),
+            ctx.issues.list({ companyId, status: "blocked" as const }).catch(() => []),
+          ]);
+          const openIssues = [...todo, ...inProgress, ...blocked];
+          if (openIssues.length > 0) {
+            const lines = openIssues.slice(0, 15).map((i) =>
+              `- ${(i as any).identifier}: ${(i as any).title} [${(i as any).status}]${(i as any).projectName ? ` (${(i as any).projectName})` : ""}`);
+            contextParts.push(`Open issues (${openIssues.length}):\n${lines.join("\n")}`);
           } else { contextParts.push("Open issues: none"); }
         } catch { contextParts.push("Issues: unavailable"); }
+
+        // Recent completed issues
+        try {
+          const done = await ctx.issues.list({ companyId, status: "done" as const });
+          if (done.length > 0) {
+            const lines = done.slice(0, 15).map((i) =>
+              `- ${(i as any).identifier}: ${(i as any).title} [done]${(i as any).projectName ? ` (${(i as any).projectName})` : ""}`);
+            contextParts.push(`Recent completed (${done.length}, showing 15):\n${lines.join("\n")}`);
+          }
+        } catch { /* ok */ }
 
         try {
           const projects = await ctx.projects.list({ companyId });
