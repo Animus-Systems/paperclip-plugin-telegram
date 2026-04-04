@@ -404,45 +404,16 @@ async function handleRoutines(
   token: string,
   chatId: string,
   messageThreadId?: number,
-  baseUrl?: string,
+  _baseUrl?: string,
 ): Promise<void> {
-  try {
-    const companyId = await resolveCompanyId(ctx, chatId);
-    const apiUrl = baseUrl || "http://localhost:3100";
-
-    const res = await ctx.http.fetch(`${apiUrl}/api/companies/${companyId}/routines`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-    });
-
-    if (!res.ok) {
-      await sendMessage(ctx, token, chatId, "Failed to fetch routines.", { messageThreadId });
-      return;
-    }
-
-    const data = await res.json() as Array<Record<string, unknown>>;
-
-    if (!data || data.length === 0) {
-      await sendMessage(ctx, token, chatId, "No routines configured.", { messageThreadId });
-      return;
-    }
-
-    const lines = data.map((r) => {
-      const status = r.status === "active" ? "🟢" : "⏸";
-      const agent = (r as any).agent?.name ?? "unassigned";
-      const triggers = ((r as any).triggers ?? []) as Array<{ type: string; schedule?: string }>;
-      const triggerStr = triggers.map(t => t.type === "schedule" ? `⏰ ${t.schedule}` : t.type).join(", ") || "no trigger";
-      return `${status} *${escapeMarkdownV2(r.title as string ?? "Untitled")}*\n  Agent: ${escapeMarkdownV2(agent)} \\| ${escapeMarkdownV2(triggerStr)}`;
-    });
-
-    const header = `*Routines \\(${data.length}\\)*\n\n`;
-    await sendMessage(ctx, token, chatId, header + lines.join("\n\n"), {
-      messageThreadId,
-      parseMode: "MarkdownV2",
-    });
-  } catch (err) {
-    await sendMessage(ctx, token, chatId, `Routines error: ${String(err).slice(0, 100)}`, { messageThreadId });
-  }
+  // Routines API not accessible via ctx.http.fetch (localhost blocked).
+  // Direct the user to ask Ava or check Paperclip UI.
+  await sendMessage(ctx, token, chatId,
+    "Routines aren't available via direct command (API limitation). Ask Ava instead:\n\n" +
+    "Just type: \"what routines do we have?\" and she'll pull the data for you.\n\n" +
+    "Or check Paperclip UI: Routines section in the sidebar.",
+    { messageThreadId },
+  );
 }
 
 async function resolveCompanyId(ctx: PluginContext, chatId: string): Promise<string> {
