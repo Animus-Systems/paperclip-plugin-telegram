@@ -1,3 +1,4 @@
+import { spawn } from "child_process";
 import {
   definePlugin,
   runWorker,
@@ -843,74 +844,78 @@ async function handleUpdate(
 
     // Send typing indicator
     await sendChatAction(ctx, token, chatId).catch(() => {});
+    ctx.logger.info("Processing DM for Ava", { chatId, from: msg.from?.username });
 
-    // Call CEO Chat plugin's action directly via HTTP (cross-plugin events don't deliver)
-    const ceoChatPluginId = "104c2d88-520b-4215-bef5-9482e5664d48";
-    const baseApiUrl = config.paperclipBaseUrl || "http://localhost:3100";
+    // Spawn Claude CLI directly (same approach as CEO Chat plugin)
+    const avaSysPrompt = "You are Ava, board assistant for Animus Group. Direct, concise, strategic. " +
+      "Org: CTO Tony (eng), CFO Oro (finance), CMO Marcus (marketing), Hermes (email), CEO Ama. " +
+      "Never say you are Claude. Just chat naturally. Keep responses concise for Telegram.";
 
-    try {
-      // Send message to Ava
-      await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ params: { companyId, text } }),
-      });
+    const cliArgs = [
+      "--print", "--output-format", "stream-json", "--verbose",
+      "--model", "claude-sonnet-4-6",
+      "--append-system-prompt", avaSysPrompt,
+      "--tools", "",
+    ];
 
-      ctx.logger.info("Sent DM to Ava via plugin action", { chatId });
+    // Resume session if exists
+    const dmCliSessionKey = `dm_cli_session_${chatId}`;
+    const resumeId = (await ctx.state.get({ scopeKind: "instance", stateKey: dmCliSessionKey }) as string) || null;
+    if (resumeId) cliArgs.push("--resume", resumeId);
 
-      // Poll for response (Ava takes 5-60s)
-      let attempts = 0;
-      const maxAttempts = 120; // 2 minutes at 1s intervals
-      const pollInterval = 1000;
+    // Spawn CLI in background
+    void (async () => {
+      try {
+        // Keep typing indicator going
+        const typingInterval = setInterval(() => sendChatAction(ctx, token, chatId).catch(() => {}), 4000);
 
-      const pollForResponse = async () => {
-        while (attempts < maxAttempts) {
-          attempts++;
-          await new Promise(r => setTimeout(r, pollInterval));
-
-          // Send typing indicator periodically
-          if (attempts % 5 === 0) await sendChatAction(ctx, token, chatId).catch(() => {});
-
-          try {
-            const pollRes = await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-poll`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ params: { companyId } }),
-            });
-            const pollData = await pollRes.json() as { pending?: { done: boolean; text: string; error: string | null } };
-
-            if (pollData?.pending?.done) {
-              const responseText = pollData.pending.text || pollData.pending.error || "(no response)";
-
-              // Acknowledge the pending response
-              await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-ack`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ params: { companyId } }),
-              }).catch(() => {});
-
-              // Send response to Telegram
-              await sendMessage(ctx, token, chatId, escapeMarkdownV2(responseText), {
-                parseMode: "MarkdownV2",
-              });
-
-              ctx.logger.info("Sent Ava response to Telegram DM", { chatId, len: responseText.length });
-              return;
+        const result = await new Promise<{ text: string; sessionId: string | null }>((resolve, reject) => {
+          const proc = spawn("claude", cliArgs, {
+            env: { ...process.env as Record<string, string>, HOME: "/paperclip" },
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 120_000,
+          });
+          let stdout = "";
+          let stderr = "";
+          proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+          proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+          proc.stdin.write(text);
+          proc.stdin.end();
+          proc.on("error", (err) => reject(err));
+          proc.on("close", (code) => {
+            if (code !== 0 && !stdout) { reject(new Error(`Claude exited ${code}: ${stderr.slice(0, 200)}`)); return; }
+            let resultText = "";
+            let sid: string | null = null;
+            for (const line of stdout.split("\n")) {
+              const t = line.trim();
+              if (!t || !t.startsWith("{")) continue;
+              try {
+                const obj = JSON.parse(t);
+                if (obj.type === "result" && typeof obj.result === "string") {
+                  resultText = obj.result;
+                  if (obj.session_id) sid = obj.session_id;
+                }
+              } catch { /* skip */ }
             }
-          } catch { /* continue polling */ }
+            resolve({ text: resultText || "(no response)", sessionId: sid });
+          });
+        });
+
+        clearInterval(typingInterval);
+
+        // Save session for continuity
+        if (result.sessionId) {
+          await ctx.state.set({ scopeKind: "instance", stateKey: dmCliSessionKey }, result.sessionId);
         }
 
-        // Timeout
-        await sendMessage(ctx, token, chatId, "Ava is taking too long to respond. Try again or use the Paperclip Chat UI.", {});
-      };
-
-      // Run polling in background (don't block the update handler)
-      pollForResponse().catch(err => ctx.logger.error("DM poll failed", { error: String(err) }));
-
-    } catch (err) {
-      ctx.logger.error("Failed to route DM to Ava", { error: String(err) });
-      await sendMessage(ctx, token, chatId, "Failed to reach Ava. Please try the Paperclip Chat UI.", {});
-    }
+        // Send response to Telegram (plain text to avoid markdown escape issues)
+        await sendMessage(ctx, token, chatId, result.text, {});
+        ctx.logger.info("Sent Ava response to Telegram DM", { chatId, len: result.text.length });
+      } catch (err) {
+        ctx.logger.error("Ava CLI failed for DM", { error: String(err) });
+        await sendMessage(ctx, token, chatId, `Ava error: ${String(err).slice(0, 200)}`, {});
+      }
+    })();
 
     await ctx.metrics.write(METRIC_NAMES.inboundRouted, 1);
     ctx.logger.info("Routed DM to Ava", { chatId, from: msg.from?.username });
