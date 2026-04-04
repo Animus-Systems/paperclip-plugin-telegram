@@ -815,59 +815,97 @@ async function handleUpdate(
     }
   }
 
-  // ── DM routing: private chat messages go to Ava (CEO Chat bridge) ──
+  // ── DM routing: private chat messages go to Ava ──
+  // Uses SAME state keys as CEO Chat plugin so history is shared across both UIs
   if (config.enableInbound && msg.chat.type === "private" && !msg.reply_to_message) {
     const companyId = await resolveCompanyId(ctx, chatId);
-    const dmThreadId = 0;
-    const sessionKey = `dm_session_${chatId}`;
-    let sessionId = (await ctx.state.get({ scopeKind: "instance", stateKey: sessionKey }) as string) || null;
 
-    if (!sessionId) {
-      sessionId = `acp_dm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      await ctx.state.set({ scopeKind: "instance", stateKey: sessionKey }, sessionId);
-
-      // Register session so ACP output handler can find it and send responses back
-      const sessions = (await ctx.state.get({ scopeKind: "instance", stateKey: `sessions_${chatId}_${dmThreadId}` }) as ChatSession[] | null) ?? [];
-      sessions.push({
-        sessionId,
-        agentId: "",
-        agentName: "ava",
-        agentDisplayName: "Ava",
-        transport: "acp",
-        spawnedAt: new Date().toISOString(),
-        status: "active",
-        lastActivityAt: new Date().toISOString(),
-      });
-      await ctx.state.set({ scopeKind: "instance", stateKey: `sessions_${chatId}_${dmThreadId}` }, sessions);
-      ctx.logger.info("Created DM session for Ava", { chatId, sessionId });
-    }
-
-    // Send typing indicator
     await sendChatAction(ctx, token, chatId).catch(() => {});
     ctx.logger.info("Processing DM for Ava", { chatId, from: msg.from?.username });
 
-    // Spawn Claude CLI directly (same approach as CEO Chat plugin)
-    const avaSysPrompt = "You are Ava, board assistant for Animus Group. Direct, concise, strategic. " +
-      "Org: CTO Tony (eng), CFO Oro (finance), CMO Marcus (marketing), Hermes (email), CEO Ama. " +
-      "Never say you are Claude. Just chat naturally. Keep responses concise for Telegram.";
+    // ── Shared state keys (same as CEO Chat plugin) ──
+    const CEO_CHAT_PLUGIN_ID = "104c2d88-520b-4215-bef5-9482e5664d48";
+    const MEMOS_URL = "http://memos:8000";
+    const AVA_AGENT_ID = "9fd584a0-9c31-4dc4-88d8-6a03c507403a";
 
-    const cliArgs = [
-      "--print", "--output-format", "stream-json", "--verbose",
-      "--model", "claude-sonnet-4-6",
-      "--append-system-prompt", avaSysPrompt,
-      "--tools", "",
-    ];
+    const historyScope = { scopeKind: "company" as const, scopeId: companyId, stateKey: "ceochat-history", pluginId: CEO_CHAT_PLUGIN_ID };
+    const cliSessionScope = { scopeKind: "company" as const, scopeId: companyId, stateKey: "ceochat-clisid", pluginId: CEO_CHAT_PLUGIN_ID };
+    const usageScope = { scopeKind: "company" as const, scopeId: companyId, stateKey: "ceochat-usage", pluginId: CEO_CHAT_PLUGIN_ID };
 
-    // Resume session if exists
-    const dmCliSessionKey = `dm_cli_session_${chatId}`;
-    const resumeId = (await ctx.state.get({ scopeKind: "instance", stateKey: dmCliSessionKey }) as string) || null;
-    if (resumeId) cliArgs.push("--resume", resumeId);
-
-    // Spawn CLI in background
     void (async () => {
       try {
-        // Keep typing indicator going
         const typingInterval = setInterval(() => sendChatAction(ctx, token, chatId).catch(() => {}), 4000);
+
+        // ── Fetch org context ──
+        const contextParts: string[] = [];
+        try {
+          const agents = await ctx.agents.list({ companyId });
+          const byStatus: Record<string, string[]> = {};
+          for (const a of agents) {
+            const agent = a as unknown as Record<string, unknown>;
+            const status = (agent.status as string) ?? "unknown";
+            (byStatus[status] ??= []).push(agent.name as string);
+          }
+          const lines = [`Agents: ${agents.length} total`];
+          for (const [status, names] of Object.entries(byStatus)) {
+            lines.push(`  ${status}: ${names.join(", ")}`);
+          }
+          contextParts.push(lines.join("\n"));
+        } catch { contextParts.push("Agents: unavailable"); }
+
+        try {
+          const issues = await ctx.issues.list({ companyId, status: "todo" as const });
+          if (issues.length > 0) {
+            const lines = issues.slice(0, 15).map((i) =>
+              `- ${(i as any).identifier}: ${(i as any).title} [${(i as any).status}]`);
+            contextParts.push(`Open issues (${issues.length}):\n${lines.join("\n")}`);
+          } else { contextParts.push("Open issues: none"); }
+        } catch { contextParts.push("Issues: unavailable"); }
+
+        // ── MemOS search ──
+        let memories: string[] = [];
+        try {
+          const res = await ctx.http.fetch(`${MEMOS_URL}/product/search`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: text, user_id: AVA_AGENT_ID, readable_cube_ids: [companyId], top_k: 5, mode: "fast" }),
+          });
+          if (res.ok) {
+            const body = await res.json() as { data?: Record<string, unknown> };
+            for (const [, entries] of Object.entries(body.data ?? {})) {
+              if (typeof entries === "string" && entries.length > 5) { memories.push(entries); continue; }
+              if (!Array.isArray(entries)) continue;
+              for (const entry of entries as Array<{ memories?: Array<{ memory?: string }> }>) {
+                for (const mem of entry.memories ?? []) {
+                  if (mem.memory && mem.memory.length > 5) memories.push(mem.memory);
+                }
+              }
+            }
+          }
+        } catch { /* ok */ }
+
+        // ── Build enriched prompt ──
+        let prompt = "[You are Ava, Animus Group board assistant. Stay in character. Use the org data below. Keep responses concise for Telegram.]\n\n";
+        prompt += `--- LIVE ORG DATA ---\n${contextParts.join("\n\n")}\n\n`;
+        if (memories.length > 0) prompt += `--- ORG MEMORIES ---\n${memories.slice(0, 5).map(m => `- ${m}`).join("\n")}\n\n`;
+        prompt += `--- BOARD MESSAGE (via Telegram) ---\n${text}`;
+
+        // ── Spawn Claude CLI with shared session ──
+        const SYS_PROMPT = "You are Ava, board assistant for Animus Group. Direct, concise, strategic. " +
+          "Never say you are Claude. Each message has live org data — use it. Keep responses concise for Telegram.";
+
+        const cliArgs = [
+          "--print", "--output-format", "stream-json", "--verbose",
+          "--model", "claude-sonnet-4-6",
+          "--append-system-prompt", SYS_PROMPT,
+          "--tools", "",
+        ];
+
+        // Use shared CLI session (same as CEO Chat plugin)
+        // Note: we read from our own plugin state since cross-plugin state isn't accessible
+        const ownCliSessionKey = { scopeKind: "instance" as const, stateKey: `ava_cli_session_${companyId}` };
+        const resumeId = (await ctx.state.get(ownCliSessionKey) as string) || null;
+        if (resumeId) cliArgs.push("--resume", resumeId);
 
         const result = await new Promise<{ text: string; sessionId: string | null }>((resolve, reject) => {
           const proc = spawn("claude", cliArgs, {
@@ -879,7 +917,7 @@ async function handleUpdate(
           let stderr = "";
           proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
           proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-          proc.stdin.write(text);
+          proc.stdin.write(prompt);
           proc.stdin.end();
           proc.on("error", (err) => reject(err));
           proc.on("close", (code) => {
@@ -903,16 +941,34 @@ async function handleUpdate(
 
         clearInterval(typingInterval);
 
-        // Save session for continuity
-        if (result.sessionId) {
-          await ctx.state.set({ scopeKind: "instance", stateKey: dmCliSessionKey }, result.sessionId);
-        }
+        // Save CLI session
+        if (result.sessionId) await ctx.state.set(ownCliSessionKey, result.sessionId);
 
-        // Send response to Telegram (plain text to avoid markdown escape issues)
+        // Send to Telegram
         await sendMessage(ctx, token, chatId, result.text, {});
-        ctx.logger.info("Sent Ava response to Telegram DM", { chatId, len: result.text.length });
+
+        // ── Store in MemOS ──
+        try {
+          await ctx.http.fetch(`${MEMOS_URL}/product/add`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: AVA_AGENT_ID, writable_cube_ids: [companyId],
+              messages: [{ role: "assistant", content: `Board asked (Telegram): "${text}"\nAva replied: "${result.text}"\n[source: telegram]\n[category: board-chat]` }],
+              async_mode: "async",
+            }),
+          });
+        } catch { /* ok */ }
+
+        // ── Log to activity ──
+        try {
+          const preview = result.text.length > 100 ? result.text.slice(0, 100) + "..." : result.text;
+          await ctx.activity.log({ companyId, message: `Board chat (Telegram) with Ava: "${preview}"`, entityType: "agent", entityId: AVA_AGENT_ID });
+        } catch { /* ok */ }
+
+        ctx.logger.info("Ava DM complete", { chatId, len: result.text.length });
       } catch (err) {
-        ctx.logger.error("Ava CLI failed for DM", { error: String(err) });
+        ctx.logger.error("Ava DM failed", { error: String(err) });
         await sendMessage(ctx, token, chatId, `Ava error: ${String(err).slice(0, 200)}`, {});
       }
     })();
