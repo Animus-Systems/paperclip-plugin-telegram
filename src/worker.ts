@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import {
   definePlugin,
   runWorker,
@@ -60,7 +60,7 @@ function loadTelegramArchive(companyId: string): TgArchivedSession[] {
 
 function saveTelegramArchiveFile(companyId: string, sessions: TgArchivedSession[]): void {
   try {
-    const { mkdirSync } = require("fs");
+    mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
     mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
     writeFileSync(`${TELEGRAM_ARCHIVE_DIR}/${companyId}.json`, JSON.stringify(sessions));
   } catch { /* ok */ }
@@ -96,7 +96,7 @@ function saveTelegramArchive(companyId: string, currentHistory: TgMessage[]): vo
   // Also write current session to file so CEO Chat can show it as "active"
   const path = `${TELEGRAM_ARCHIVE_DIR}/${companyId}-current.json`;
   try {
-    const { mkdirSync } = require("fs");
+    mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
     mkdirSync(TELEGRAM_ARCHIVE_DIR, { recursive: true });
     writeFileSync(path, JSON.stringify(currentHistory));
   } catch { /* ok */ }
