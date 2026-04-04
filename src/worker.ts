@@ -844,15 +844,73 @@ async function handleUpdate(
     // Send typing indicator
     await sendChatAction(ctx, token, chatId).catch(() => {});
 
-    // Emit ACP event — the CEO Chat plugin listens for these
-    ctx.events.emit(ACP_SPAWN_EVENT, companyId, {
-      type: "message",
-      sessionId,
-      agentName: "Ava",
-      chatId,
-      threadId: dmThreadId,
-      text,
-    });
+    // Call CEO Chat plugin's action directly via HTTP (cross-plugin events don't deliver)
+    const ceoChatPluginId = "104c2d88-520b-4215-bef5-9482e5664d48";
+    const baseApiUrl = config.paperclipBaseUrl || "http://localhost:3100";
+
+    try {
+      // Send message to Ava
+      await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ params: { companyId, text } }),
+      });
+
+      ctx.logger.info("Sent DM to Ava via plugin action", { chatId });
+
+      // Poll for response (Ava takes 5-60s)
+      let attempts = 0;
+      const maxAttempts = 120; // 2 minutes at 1s intervals
+      const pollInterval = 1000;
+
+      const pollForResponse = async () => {
+        while (attempts < maxAttempts) {
+          attempts++;
+          await new Promise(r => setTimeout(r, pollInterval));
+
+          // Send typing indicator periodically
+          if (attempts % 5 === 0) await sendChatAction(ctx, token, chatId).catch(() => {});
+
+          try {
+            const pollRes = await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-poll`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ params: { companyId } }),
+            });
+            const pollData = await pollRes.json() as { pending?: { done: boolean; text: string; error: string | null } };
+
+            if (pollData?.pending?.done) {
+              const responseText = pollData.pending.text || pollData.pending.error || "(no response)";
+
+              // Acknowledge the pending response
+              await ctx.http.fetch(`${baseApiUrl}/plugins/${ceoChatPluginId}/actions/chat-ack`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ params: { companyId } }),
+              }).catch(() => {});
+
+              // Send response to Telegram
+              await sendMessage(ctx, token, chatId, escapeMarkdownV2(responseText), {
+                parseMode: "MarkdownV2",
+              });
+
+              ctx.logger.info("Sent Ava response to Telegram DM", { chatId, len: responseText.length });
+              return;
+            }
+          } catch { /* continue polling */ }
+        }
+
+        // Timeout
+        await sendMessage(ctx, token, chatId, "Ava is taking too long to respond. Try again or use the Paperclip Chat UI.", {});
+      };
+
+      // Run polling in background (don't block the update handler)
+      pollForResponse().catch(err => ctx.logger.error("DM poll failed", { error: String(err) }));
+
+    } catch (err) {
+      ctx.logger.error("Failed to route DM to Ava", { error: String(err) });
+      await sendMessage(ctx, token, chatId, "Failed to reach Ava. Please try the Paperclip Chat UI.", {});
+    }
 
     await ctx.metrics.write(METRIC_NAMES.inboundRouted, 1);
     ctx.logger.info("Routed DM to Ava", { chatId, from: msg.from?.username });
