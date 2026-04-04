@@ -1046,8 +1046,35 @@ async function handleUpdate(
         // Save CLI session
         if (result.sessionId) await ctx.state.set(ownCliSessionKey, result.sessionId);
 
+        // Execute paperclip-action blocks (issue creation etc.)
+        let responseText = result.text;
+        const actionMatch = result.text.match(/```paperclip-action\n([\s\S]*?)\n```/);
+        if (actionMatch) {
+          try {
+            const action = JSON.parse(actionMatch[1]);
+            if (action.action === "create_issue") {
+              let assigneeId: string | undefined;
+              if (action.assignee) {
+                const agents = await ctx.agents.list({ companyId });
+                const match = agents.find((a: any) => (a.name as string)?.toLowerCase() === action.assignee.toLowerCase());
+                if (match) assigneeId = match.id;
+              }
+              const issue = await ctx.issues.create({
+                companyId, title: action.title, description: action.description ?? "",
+                priority: action.priority ?? "medium",
+                ...(assigneeId ? { assigneeAgentId: assigneeId } : {}),
+              });
+              const issueId = (issue as any).identifier ?? (issue as any).id;
+              responseText = responseText.replace(actionMatch[0], `\n[Created issue ${issueId}]`);
+              ctx.logger.info("Created issue from Telegram DM", { issueId });
+            }
+          } catch (err) {
+            responseText = responseText.replace(actionMatch[0], `\n[Action failed: ${String(err).slice(0, 100)}]`);
+          }
+        }
+
         // Send to Telegram
-        await sendMessage(ctx, token, chatId, result.text, {});
+        await sendMessage(ctx, token, chatId, responseText, {});
 
         // ── Save to Telegram DM history (shared file for CEO Chat UI) ──
         try {

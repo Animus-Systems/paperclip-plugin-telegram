@@ -12,7 +12,9 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "status", description: "Company health: active agents, open issues" },
   { command: "issues", description: "List open issues (optionally by project)" },
   { command: "agents", description: "List agents with current status" },
+  { command: "routines", description: "List active routines and their schedules" },
   { command: "approve", description: "Approve a pending request by ID" },
+  { command: "archive", description: "Archive current chat session with Ava" },
   { command: "help", description: "Show available commands" },
   { command: "connect", description: "Link this chat to a Paperclip company" },
   { command: "connect_topic", description: "Map a project to a forum topic" },
@@ -56,6 +58,9 @@ export async function handleCommand(
       break;
     case "acp":
       await handleAcpCommand(ctx, token, chatId, args, messageThreadId);
+      break;
+    case "routines":
+      await handleRoutines(ctx, token, chatId, messageThreadId, baseUrl);
       break;
     default:
       await sendMessage(ctx, token, chatId, `Unknown command: /${command}. Try /help`, {
@@ -392,6 +397,52 @@ export async function getTopicForProject(
   if (!topicMap) return undefined;
   const topicId = topicMap[projectName];
   return topicId ? Number(topicId) : undefined;
+}
+
+async function handleRoutines(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  messageThreadId?: number,
+  baseUrl?: string,
+): Promise<void> {
+  try {
+    const companyId = await resolveCompanyId(ctx, chatId);
+    const apiUrl = baseUrl || "http://localhost:3100";
+
+    const res = await ctx.http.fetch(`${apiUrl}/api/companies/${companyId}/routines`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!res.ok) {
+      await sendMessage(ctx, token, chatId, "Failed to fetch routines.", { messageThreadId });
+      return;
+    }
+
+    const data = await res.json() as Array<Record<string, unknown>>;
+
+    if (!data || data.length === 0) {
+      await sendMessage(ctx, token, chatId, "No routines configured.", { messageThreadId });
+      return;
+    }
+
+    const lines = data.map((r) => {
+      const status = r.status === "active" ? "🟢" : "⏸";
+      const agent = (r as any).agent?.name ?? "unassigned";
+      const triggers = ((r as any).triggers ?? []) as Array<{ type: string; schedule?: string }>;
+      const triggerStr = triggers.map(t => t.type === "schedule" ? `⏰ ${t.schedule}` : t.type).join(", ") || "no trigger";
+      return `${status} *${escapeMarkdownV2(r.title as string ?? "Untitled")}*\n  Agent: ${escapeMarkdownV2(agent)} \\| ${escapeMarkdownV2(triggerStr)}`;
+    });
+
+    const header = `*Routines \\(${data.length}\\)*\n\n`;
+    await sendMessage(ctx, token, chatId, header + lines.join("\n\n"), {
+      messageThreadId,
+      parseMode: "MarkdownV2",
+    });
+  } catch (err) {
+    await sendMessage(ctx, token, chatId, `Routines error: ${String(err).slice(0, 100)}`, { messageThreadId });
+  }
 }
 
 async function resolveCompanyId(ctx: PluginContext, chatId: string): Promise<string> {
