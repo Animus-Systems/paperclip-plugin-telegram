@@ -15,6 +15,7 @@ import {
   escapeMarkdownV2,
   isForum,
   GENERAL_TOPIC_THREAD_ID,
+  sendChatAction,
 } from "./telegram-api.js";
 import {
   formatIssueCreated,
@@ -33,11 +34,12 @@ import {
   handleHandoffApproval,
   handleHandoffRejection,
   setupAcpOutputListener,
+  type ChatSession,
 } from "./acp-bridge.js";
 import { handleMediaMessage } from "./media-pipeline.js";
 import { handleCommandsCommand, tryCustomCommand } from "./command-registry.js";
 import { handleRegisterWatch, checkWatches } from "./watch-registry.js";
-import { METRIC_NAMES } from "./constants.js";
+import { METRIC_NAMES, ACP_SPAWN_EVENT } from "./constants.js";
 import { EscalationManager } from "./escalation.js";
 import type { EscalationEvent } from "./escalation.js";
 
@@ -810,6 +812,50 @@ async function handleUpdate(
         ctx.logger.error("Failed to route inbound message", { error: String(err) });
       }
     }
+  }
+
+  // ── DM routing: private chat messages go to Ava (CEO Chat bridge) ──
+  if (config.enableInbound && msg.chat.type === "private" && !msg.reply_to_message) {
+    const companyId = await resolveCompanyId(ctx, chatId);
+    const dmThreadId = 0;
+    const sessionKey = `dm_session_${chatId}`;
+    let sessionId = (await ctx.state.get({ scopeKind: "instance", stateKey: sessionKey }) as string) || null;
+
+    if (!sessionId) {
+      sessionId = `acp_dm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      await ctx.state.set({ scopeKind: "instance", stateKey: sessionKey }, sessionId);
+
+      // Register session so ACP output handler can find it and send responses back
+      const sessions = (await ctx.state.get({ scopeKind: "instance", stateKey: `sessions_${chatId}_${dmThreadId}` }) as ChatSession[] | null) ?? [];
+      sessions.push({
+        sessionId,
+        agentId: "",
+        agentName: "ava",
+        agentDisplayName: "Ava",
+        transport: "acp",
+        spawnedAt: new Date().toISOString(),
+        status: "active",
+        lastActivityAt: new Date().toISOString(),
+      });
+      await ctx.state.set({ scopeKind: "instance", stateKey: `sessions_${chatId}_${dmThreadId}` }, sessions);
+      ctx.logger.info("Created DM session for Ava", { chatId, sessionId });
+    }
+
+    // Send typing indicator
+    await sendChatAction(ctx, token, chatId).catch(() => {});
+
+    // Emit ACP event — the CEO Chat plugin listens for these
+    ctx.events.emit(ACP_SPAWN_EVENT, companyId, {
+      type: "message",
+      sessionId,
+      agentName: "Ava",
+      chatId,
+      threadId: dmThreadId,
+      text,
+    });
+
+    await ctx.metrics.write(METRIC_NAMES.inboundRouted, 1);
+    ctx.logger.info("Routed DM to Ava", { chatId, from: msg.from?.username });
   }
 }
 
