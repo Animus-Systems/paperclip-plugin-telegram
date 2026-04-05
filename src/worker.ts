@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import {
   definePlugin,
-  runWorker,
+  startWorkerRpcHost,
   type PluginContext,
   type PluginEvent,
   type PluginHealthDiagnostics,
@@ -915,6 +915,45 @@ async function handleUpdate(
       try {
         const typingInterval = setInterval(() => sendChatAction(ctx, token, chatId).catch(() => {}), 4000);
 
+        // ── Try direct issue creation before calling Claude ──
+        const createPattern = /(?:create|make|open|raise|add)\s+(?:an?\s+)?(?:issue|task|ticket)\s+(?:for\s+)?(\w+)\s+to\s+(.+)/i;
+        const createMatch = text.match(createPattern);
+        if (createMatch) {
+          const agentName = createMatch[1].trim();
+          const taskDescription = createMatch[2].trim();
+          try {
+            const agents = await ctx.agents.list({ companyId });
+            const agent = agents.find((a: { name?: string }) => a.name?.toLowerCase() === agentName.toLowerCase());
+            const title = taskDescription.length > 80 ? taskDescription.substring(0, 77) + "..." : taskDescription;
+            const issue = await ctx.issues.create({
+              companyId, title, description: taskDescription,
+              priority: "medium" as const,
+              ...(agent ? { assigneeAgentId: agent.id } : {}),
+            });
+            const issueRaw = issue as unknown as Record<string, unknown>;
+            const issueId = issueRaw.identifier ?? issueRaw.id;
+            // Set status to todo so adaptive heartbeat picks it up
+            if (issueRaw.id) {
+              await ctx.issues.update(issueRaw.id as string, { status: "todo" }, companyId);
+            }
+            const response = `Done. Created ${issueId} — "${title}" assigned to ${agent?.name ?? agentName}.`;
+            clearInterval(typingInterval);
+            await sendMessage(ctx, token, chatId, response);
+            // Save to shared history
+            try {
+              const hist = ((await ctx.state.get(historyScope)) ?? []) as Array<{ role: string; content: string; timestamp: string; source?: string }>;
+              hist.push({ role: "user", content: text, timestamp: new Date().toISOString(), source: "telegram" });
+              hist.push({ role: "assistant", content: response, timestamp: new Date().toISOString(), source: "telegram" });
+              await ctx.state.set(historyScope, hist.slice(-200));
+            } catch { /* ok */ }
+            return;
+          } catch (err) {
+            clearInterval(typingInterval);
+            await sendMessage(ctx, token, chatId, `Failed to create issue: ${String(err).substring(0, 200)}`);
+            return;
+          }
+        }
+
         // ── Fetch org context ──
         const contextParts: string[] = [];
         try {
@@ -1234,4 +1273,5 @@ async function handleCallbackQuery(
   await answerCallbackQuery(ctx, token, query.id, "Unknown action");
 }
 
-runWorker(plugin, import.meta.url);
+export default plugin;
+startWorkerRpcHost({ plugin });
