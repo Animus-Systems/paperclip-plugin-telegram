@@ -1009,7 +1009,7 @@ async function handleUpdate(
           const res = await ctx.http.fetch(`${MEMOS_URL}/product/search`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: text, user_id: AVA_AGENT_ID, readable_cube_ids: [companyId], top_k: 5, mode: "fast" }),
+            body: JSON.stringify({ query: text, user_id: AVA_AGENT_ID, readable_cube_ids: [companyId], top_k: 8, mode: "fast" }),
           });
           if (res.ok) {
             const body = await res.json() as { data?: Record<string, unknown> };
@@ -1026,20 +1026,35 @@ async function handleUpdate(
         } catch { /* ok */ }
 
         // ── Build enriched prompt ──
-        let prompt = "[You are Ava, Animus Group board assistant. Stay in character. Use the org data below. Keep responses concise for Telegram.]\n\n";
+        let prompt = "[You are Ava, Animus Group board assistant. Stay in character. Use the org data below to answer.]\n\n";
         prompt += `--- LIVE ORG DATA ---\n${contextParts.join("\n\n")}\n\n`;
-        if (memories.length > 0) prompt += `--- ORG MEMORIES ---\n${memories.slice(0, 5).map(m => `- ${m}`).join("\n")}\n\n`;
+        if (memories.length > 0) prompt += `--- ORG MEMORIES ---\n${memories.slice(0, 8).map(m => `- ${m}`).join("\n")}\n\n`;
         prompt += `--- BOARD MESSAGE (via Telegram) ---\n${text}`;
 
         // ── Spawn Claude CLI with shared session ──
-        const SYS_PROMPT = "You are Ava, board assistant for Animus Group. Direct, concise, strategic. " +
-          "Never say you are Claude. Each message has live org data — use it. Keep responses concise for Telegram.";
+        const SYS_PROMPT = `You are Ava, board assistant for Animus Group. Direct, concise, strategic personality.
+Never identify as Claude or mention Anthropic. You are Ava.
+
+Org: CEO Ama (your principal), CTO Tony (eng, 13 reports), CFO Oro (finance, 11 reports), CMO Marcus (marketing, 18 reports), Hermes (email).
+Each message contains LIVE ORG DATA and ORG MEMORIES. Use them to answer.
+Never say you lack credentials, API access, or data — the data is in the message.
+Keep responses concise for Telegram (short paragraphs, bullet points).
+
+ISSUE CREATION: When the user asks to create a task, assign work, or delegate something, create a Paperclip issue. Format:
+\`\`\`paperclip-action
+action: create-issue
+title: <clear title>
+assignee: <agent name>
+priority: <low|medium|high|urgent>
+description: <what needs to be done>
+\`\`\`
+Route to the right agent: Tony's team for engineering, Oro's team for finance/tax, Marcus's team for marketing/SEO/content.`;
 
         const cliArgs = [
           "--print", "--output-format", "stream-json", "--verbose",
           "--model", "claude-sonnet-4-6",
           "--append-system-prompt", SYS_PROMPT,
-          "--tools", "",
+          "--tools", "Read,Glob,Grep",
         ];
 
         // Use shared CLI session (same as CEO Chat plugin)
