@@ -126,7 +126,12 @@ async function handleIssues(
   try {
     const companyId = await resolveCompanyId(ctx, chatId);
     const company = await ctx.companies.get(companyId);
-    const issues = await ctx.issues.list({ companyId, limit: 10 });
+    const [todo, inProgress, blocked] = await Promise.all([
+      ctx.issues.list({ companyId, status: "todo" as const }).catch(() => []),
+      ctx.issues.list({ companyId, status: "in_progress" as const }).catch(() => []),
+      ctx.issues.list({ companyId, status: "blocked" as const }).catch(() => []),
+    ]);
+    const issues = [...todo, ...inProgress, ...blocked].slice(0, 20);
     const filtered = projectFilter
       ? issues.filter((i: Issue) => {
           const projName = i.project?.name ?? "";

@@ -986,15 +986,7 @@ async function handleUpdate(
           } else { contextParts.push("Open issues: none"); }
         } catch { contextParts.push("Issues: unavailable"); }
 
-        // Recent completed issues
-        try {
-          const done = await ctx.issues.list({ companyId, status: "done" as const });
-          if (done.length > 0) {
-            const lines = done.slice(0, 15).map((i) =>
-              `- ${(i as any).identifier}: ${(i as any).title} [done]${(i as any).projectName ? ` (${(i as any).projectName})` : ""}`);
-            contextParts.push(`Recent completed (${done.length}, showing 15):\n${lines.join("\n")}`);
-          }
-        } catch { /* ok */ }
+        // Skip completed issues — only show open work in DM context
 
         try {
           const projects = await ctx.projects.list({ companyId });
