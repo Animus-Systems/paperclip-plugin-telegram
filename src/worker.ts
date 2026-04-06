@@ -402,9 +402,12 @@ const plugin = definePlugin({
     ctx.events.on("agent.run.started", (event: PluginEvent) =>
       notify(event, formatAgentRunStarted),
     );
-    ctx.events.on("agent.run.finished", (event: PluginEvent) =>
-      notify(event, formatAgentRunFinished),
-    );
+    ctx.events.on("agent.run.finished", (event: PluginEvent) => {
+      // Only notify for task runs (with an issueId), not idle heartbeats
+      const payload = event.payload as Record<string, unknown>;
+      if (!payload?.issueId) return;
+      notify(event, formatAgentRunFinished);
+    });
 
     // --- Per-company chat overrides ---
 
